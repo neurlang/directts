@@ -1,0 +1,23 @@
+SAMPLE_RATE = 48000
+N_FREQS = 768
+N_CHANNELS = 2
+
+DATA_TSV = "dataset/dataset.tsv"
+WAVS_DIR = "dataset/wavs48khz"
+
+# Model
+D_MODEL = 128
+N_LAYERS = 4
+N_HEADS = 4
+FF_DIM = 512
+DROPOUT = 0.1
+MAX_TEXT_LEN = 50
+MAX_SPEC_LEN = 200
+FPS_PER_CHAR = 6
+
+# Training
+LR = 1e-4
+BATCH_SIZE = 2
+EPOCHS = 500
+CLIP_GRAD_NORM = 1.0
+
