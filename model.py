@@ -47,6 +47,7 @@ class SpecDecoder(nn.Module):
         layer = nn.TransformerDecoderLayer(d_model, n_heads, ff_dim, dropout, batch_first=True)
         self.decoder = nn.TransformerDecoder(layer, n_layers)
         self.output_proj = nn.Linear(d_model, self.frame_size)
+        self.eos_head = nn.Linear(d_model, 2)
 
     def forward(self, memory, spec_frames, tgt_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None):
@@ -55,7 +56,9 @@ class SpecDecoder(nn.Module):
         x = self.decoder(x, memory, tgt_mask=tgt_mask,
                          tgt_key_padding_mask=tgt_key_padding_mask,
                          memory_key_padding_mask=memory_key_padding_mask)
-        return self.output_proj(x)
+        frame_pred = self.output_proj(x)
+        eos_logits = self.eos_head(x)
+        return frame_pred, eos_logits
 
 
 def _causal_mask(sz, device):
@@ -74,28 +77,29 @@ class DirectTTS(nn.Module):
         memory = self.encoder(tokens, mask=token_mask)
         T = spec_frames.size(1)
         tgt_mask = _causal_mask(T, spec_frames.device)
-        pred = self.decoder(memory, spec_frames, tgt_mask=tgt_mask,
-                            tgt_key_padding_mask=frame_mask,
-                            memory_key_padding_mask=token_mask)
-        return pred
+        frame_pred, eos_logits = self.decoder(memory, spec_frames, tgt_mask=tgt_mask,
+                                              tgt_key_padding_mask=frame_mask,
+                                              memory_key_padding_mask=token_mask)
+        return frame_pred, eos_logits
 
     @torch.no_grad()
-    def generate(self, tokens, fps_per_char=FPS_PER_CHAR, max_frames=MAX_SPEC_LEN):
+    def generate(self, tokens, eos_threshold=0.5, max_frames=MAX_SPEC_LEN):
         self.eval()
         B = tokens.size(0)
         memory = self.encoder(tokens)
 
-        n_chars = (tokens != 0).sum().item()
-        n_frames = min(max(n_chars * fps_per_char, 1), max_frames)
-
         frame = self.decoder.start_frame.expand(B, -1, -1)
 
-        for _ in range(n_frames):
+        for _ in range(max_frames):
             T = frame.size(1)
             tgt_mask = _causal_mask(T, tokens.device)
-            out = self.decoder(memory, frame, tgt_mask=tgt_mask)
-            next_frame = out[:, -1:, :]
+            frame_pred, eos_logits = self.decoder(memory, frame, tgt_mask=tgt_mask)
+            next_frame = frame_pred[:, -1:, :]
             frame = torch.cat([frame, next_frame], dim=1)
+
+            eos_prob = torch.softmax(eos_logits[:, -1, :], dim=-1)
+            if eos_prob[0, 1] > eos_threshold:
+                break
 
         spec = frame[:, 1:, :]
         return spec
