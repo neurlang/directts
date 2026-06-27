@@ -1,11 +1,11 @@
-# DirecTTS
-## [zero vocoder, TTS transformer only]
+# ⤳ DirecTTS
+## ⤳ [zero vocoder, TTS transformer only]
 
 Direct phase-spectrogram neural text-to-speech with encoder-decoder transformer.
 
 Maps text to raw phase spectrogram frames (768×2 per frame) in a single autoregressive pass, then reconstructs audio via the inverse phase transform — no vocoder, no intermediate representations.
 
-## Architecture
+## ⤳ Architecture
 
 ```
 Text → IPA phonemes → TextEncoder(6-layer transformer) → memory
@@ -21,13 +21,13 @@ Spec frames ← output_proj ← SpecDecoder(4-layer transformer) ← prenet ← 
 - **EOS head**: binary classifier on decoder outputs to predict the final frame, enabling variable-length generation
 - **Positional encoding**: sinusoidal, applied to both encoder and decoder inputs
 
-## Dataset
+## ⤳ Dataset
 
 Slovak speech from [SlovakSpeech](https://huggingface.co/datasets/neurlang/slovakspeech_female_dataset) corpus, 48 kHz mono WAV files listed in `dataset/dataset.tsv` in `path<TAB>text<TAB>text` format.
 
 Text is phonemized to IPA via [Pygoruut](https://pypi.org/project/pygoruut/) before tokenization. The tokenizer builds a character-level vocabulary from all unique IPA characters across the dataset.
 
-## Training
+## ⤳ Training
 
 ```bash
 ./train.sh
@@ -61,7 +61,7 @@ Default hyperparameters in `config.py`:
 | MAX_SPEC_LEN | 200 |
 | SAMPLE_RATE | 48000 |
 
-## Inference
+## ⤳ Inference
 
 ```bash
 ./generate.sh "text to speak"
@@ -79,7 +79,7 @@ The inference pipeline:
 4. Reshape flat phase frames to 2-channel array
 5. Inverse phase transform → audio waveform → WAV file
 
-## Requirements
+## ⤳ Requirements
 
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - PyTorch (automatically resolved by `uv run --with torch`)
@@ -89,7 +89,7 @@ The inference pipeline:
 
 All dependencies are resolved on-the-fly by `uv run --with ...` — no virtual environment setup needed.
 
-## Files
+## ⤳ Files
 
 | File | Purpose |
 |------|---------|
