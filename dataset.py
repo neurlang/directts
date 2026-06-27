@@ -5,7 +5,7 @@ import soundfile as sf
 import numpy as np
 from phase import Phase
 
-from config import SAMPLE_RATE, N_FREQS, N_CHANNELS, DATA_TSV, WAVS_DIR, LANGUAGE, PHONEMIZE_TRIALS
+from config import SAMPLE_RATE, N_FREQS, N_CHANNELS, DATA_TSV, WAVS_DIR, LANGUAGE
 
 
 class TextTokenizer:
@@ -55,13 +55,9 @@ class TTSDataset(Dataset):
 
         from pygoruut.pygoruut import Pygoruut
         self.pygoruut = Pygoruut(writeable_bin_dir="")
-        instances = [Pygoruut(writeable_bin_dir="") for _ in range(PHONEMIZE_TRIALS)]
         self.ipa_texts = []
         for t in self.texts:
-            variants = set()
-            for i in range(PHONEMIZE_TRIALS):
-                variants.add(str(instances[i].phonemize(language=language, sentence=t)))
-            self.ipa_texts.append(variants)
+            self.ipa_texts.append([str(self.pygoruut.phonemize(language=language, sentence=t))])
 
         all_ipa = [v for variants in self.ipa_texts for v in variants]
         self.tokenizer = TextTokenizer(all_ipa)

@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import D_MODEL, N_LAYERS, N_HEADS, FF_DIM, DROPOUT, MAX_TEXT_LEN, MAX_SPEC_LEN, N_FREQS, N_CHANNELS
+from config import D_MODEL, N_ENCODER_LAYERS, N_DECODER_LAYERS, N_HEADS, FF_DIM, DROPOUT, MAX_TEXT_LEN, MAX_SPEC_LEN, N_FREQS, N_CHANNELS
 
 
 class PositionalEncoding(nn.Module):
@@ -21,7 +21,7 @@ class PositionalEncoding(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, vocab_size, d_model=D_MODEL, n_layers=N_LAYERS,
+    def __init__(self, vocab_size, d_model=D_MODEL, n_layers=N_ENCODER_LAYERS,
                  n_heads=N_HEADS, ff_dim=FF_DIM, dropout=DROPOUT, max_len=MAX_TEXT_LEN):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
@@ -37,11 +37,18 @@ class TextEncoder(nn.Module):
 
 
 class SpecDecoder(nn.Module):
-    def __init__(self, d_model=D_MODEL, n_layers=N_LAYERS,
+    def __init__(self, d_model=D_MODEL, n_layers=N_DECODER_LAYERS,
                  n_heads=N_HEADS, ff_dim=FF_DIM, dropout=DROPOUT, max_len=MAX_SPEC_LEN):
         super().__init__()
         self.frame_size = N_FREQS * N_CHANNELS
-        self.frame_embed = nn.Linear(self.frame_size, d_model)
+        self.prenet = nn.Sequential(
+            nn.Linear(self.frame_size, d_model),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+        )
         self.pos_enc = PositionalEncoding(d_model, max_len)
         self.start_frame = nn.Parameter(torch.randn(1, 1, self.frame_size) * 0.01)
         layer = nn.TransformerDecoderLayer(d_model, n_heads, ff_dim, dropout, batch_first=True)
@@ -51,7 +58,7 @@ class SpecDecoder(nn.Module):
 
     def forward(self, memory, spec_frames, tgt_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None):
-        x = self.frame_embed(spec_frames)
+        x = self.prenet(spec_frames)
         x = self.pos_enc(x)
         x = self.decoder(x, memory, tgt_mask=tgt_mask,
                          tgt_key_padding_mask=tgt_key_padding_mask,
@@ -66,12 +73,13 @@ def _causal_mask(sz, device):
 
 
 class DirectTTS(nn.Module):
-    def __init__(self, vocab_size, d_model=D_MODEL, n_layers=N_LAYERS,
+    def __init__(self, vocab_size, d_model=D_MODEL,
+                 n_enc_layers=N_ENCODER_LAYERS, n_dec_layers=N_DECODER_LAYERS,
                  n_heads=N_HEADS, ff_dim=FF_DIM, dropout=DROPOUT,
                  max_text_len=MAX_TEXT_LEN, max_spec_len=MAX_SPEC_LEN):
         super().__init__()
-        self.encoder = TextEncoder(vocab_size, d_model, n_layers, n_heads, ff_dim, dropout, max_text_len)
-        self.decoder = SpecDecoder(d_model, n_layers, n_heads, ff_dim, dropout, max_spec_len)
+        self.encoder = TextEncoder(vocab_size, d_model, n_enc_layers, n_heads, ff_dim, dropout, max_text_len)
+        self.decoder = SpecDecoder(d_model, n_dec_layers, n_heads, ff_dim, dropout, max_spec_len)
 
     def forward(self, tokens, spec_frames, token_mask=None, frame_mask=None):
         memory = self.encoder(tokens, mask=token_mask)

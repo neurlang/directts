@@ -44,7 +44,8 @@ def pad_collate(batch):
     }
 
 
-def generate_sample(model, text, tokenizer, output_path, device):
+def generate_sample(model, text, tokenizer, output_path, device, pygoruut, language):
+    text = str(pygoruut.phonemize(language=language, sentence=text))
     model.eval()
     tokens = tokenizer.encode(text).unsqueeze(0).to(device)
     gen_spec = model.generate(tokens)
@@ -109,7 +110,7 @@ def train():
             for text in tqdm(ds.texts[:5] if len(ds.texts) >= 5 else ds.texts):
                 safe = "".join(c if c.isalnum() else "_" for c in text)[:30]
                 wav_path = f"train_{safe}_epoch_{epoch}.wav"
-                generate_sample(model, text, ds.tokenizer, wav_path, device)
+                generate_sample(model, text, ds.tokenizer, wav_path, device, ds.pygoruut, ds.language)
             print(f"{epoch:>6}  {loss_frame.item():>8.4f}  {loss_eos.item():>8.4f}  {loss.item():>8.4f}")
 
     torch.save({"model": model.state_dict(), "tokenizer": ds.tokenizer}, "trained_model.pt")
