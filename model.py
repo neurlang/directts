@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import D_MODEL, N_LAYERS, N_HEADS, FF_DIM, DROPOUT, MAX_TEXT_LEN, MAX_SPEC_LEN, FPS_PER_CHAR, N_FREQS, N_CHANNELS
+from config import D_MODEL, N_LAYERS, N_HEADS, FF_DIM, DROPOUT, MAX_TEXT_LEN, MAX_SPEC_LEN, N_FREQS, N_CHANNELS
 
 
 class PositionalEncoding(nn.Module):
