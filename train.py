@@ -7,8 +7,8 @@ from phase import Phase
 
 from model import DirectTTS
 from dataset import TTSDataset
-from config import LR, EPOCHS, CLIP_GRAD_NORM, SAMPLE_RATE
-
+from config import LR, EPOCHS, CLIP_GRAD_NORM, SAMPLE_RATE, BATCH_SIZE
+from tqdm import tqdm
 
 def pad_collate(batch):
     specs = [item["spec"] for item in batch]
@@ -44,9 +44,9 @@ def pad_collate(batch):
     }
 
 
-def generate_sample(model, text, tokenizer, output_path):
+def generate_sample(model, text, tokenizer, output_path, device):
     model.eval()
-    tokens = tokenizer.encode(text).unsqueeze(0)
+    tokens = tokenizer.encode(text).unsqueeze(0).to(device)
     gen_spec = model.generate(tokens)
     spec_np = gen_spec.squeeze(0).reshape(-1, 2).cpu().numpy()
     phase = Phase(sample_rate=SAMPLE_RATE)
@@ -56,23 +56,30 @@ def generate_sample(model, text, tokenizer, output_path):
 
 
 def train():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ds = TTSDataset()
-    loader = DataLoader(ds, batch_size=len(ds), shuffle=True, collate_fn=pad_collate)
+    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pad_collate)
 
-    model = DirectTTS(ds.tokenizer.vocab_size)
+    model = DirectTTS(ds.tokenizer.vocab_size).to(device)
     optim = AdamW(model.parameters(), lr=LR)
 
     print(f"Training on {len(ds)} samples. Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Samples: {ds.texts}")
-    print(f"{'Epoch':>6}  {'Frame':>8}  {'EOS':>8}  {'Total':>8}")
+    print("\nGround truth IPA variants:")
+    for text, variants in zip(ds.texts, ds.ipa_texts):
+        sample_ipa = next(iter(variants))
+        tokens = ds.tokenizer.encode(sample_ipa)
+        print(f'  "{text}" → {len(variants)} variant(s): {sorted(variants)}')
+        print(f'    tokens: {tokens.tolist()}')
+    print(f"\n{'Epoch':>6}  {'Frame':>8}  {'EOS':>8}  {'Total':>8}")
     print("-" * 36)
 
     for epoch in range(1, EPOCHS + 1):
-        for batch in loader:
-            spec = batch["spec"]
-            tokens = batch["tokens"]
-            token_mask = batch["token_mask"]
-            frame_mask = batch["frame_mask"]
+        for batch in tqdm(loader):
+            spec = batch["spec"].to(device)
+            tokens = batch["tokens"].to(device)
+            token_mask = batch["token_mask"].to(device)
+            frame_mask = batch["frame_mask"].to(device)
 
             B, T, nF, C = spec.shape
             spec_flat = spec.view(B, T, -1)
@@ -99,12 +106,13 @@ def train():
             optim.step()
 
         if epoch == 1 or epoch % 100 == 0 or epoch == EPOCHS:
-            for text in ds.texts:
-                wav_path = f"train_{text}_epoch_{epoch}.wav"
-                generate_sample(model, text, ds.tokenizer, wav_path)
+            for text in tqdm(ds.texts[:5] if len(ds.texts) >= 5 else ds.texts):
+                safe = "".join(c if c.isalnum() else "_" for c in text)[:30]
+                wav_path = f"train_{safe}_epoch_{epoch}.wav"
+                generate_sample(model, text, ds.tokenizer, wav_path, device)
             print(f"{epoch:>6}  {loss_frame.item():>8.4f}  {loss_eos.item():>8.4f}  {loss.item():>8.4f}")
 
-    torch.save(model.state_dict(), "trained_model.pt")
+    torch.save({"model": model.state_dict(), "tokenizer": ds.tokenizer}, "trained_model.pt")
     print(f"\nFinal frame loss: {loss_frame.item():.6f}, EOS loss: {loss_eos.item():.4f}")
     print("Model saved to trained_model.pt")
 

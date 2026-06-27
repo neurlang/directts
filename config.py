@@ -5,18 +5,22 @@ N_CHANNELS = 2
 DATA_TSV = "dataset/dataset.tsv"
 WAVS_DIR = "dataset/wavs48khz"
 
+# Phonemization
+LANGUAGE = "Slovak"
+PHONEMIZE_TRIALS = 1
+
 # Model
 D_MODEL = 128
 N_LAYERS = 4
 N_HEADS = 4
 FF_DIM = 512
 DROPOUT = 0.1
-MAX_TEXT_LEN = 50
-MAX_SPEC_LEN = 200
+MAX_TEXT_LEN = 1200
+MAX_SPEC_LEN = 300
 
 # Training
 LR = 3e-4
-BATCH_SIZE = 3
-EPOCHS = 3000
+BATCH_SIZE = 8
+EPOCHS = 2000
 CLIP_GRAD_NORM = 1.0
 

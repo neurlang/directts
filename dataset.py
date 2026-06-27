@@ -1,10 +1,11 @@
+import random
 import torch
 from torch.utils.data import Dataset
 import soundfile as sf
 import numpy as np
 from phase import Phase
 
-from config import SAMPLE_RATE, N_FREQS, N_CHANNELS, DATA_TSV, WAVS_DIR
+from config import SAMPLE_RATE, N_FREQS, N_CHANNELS, DATA_TSV, WAVS_DIR, LANGUAGE, PHONEMIZE_TRIALS
 
 
 class TextTokenizer:
@@ -35,10 +36,11 @@ class TextTokenizer:
 
 
 class TTSDataset(Dataset):
-    def __init__(self, tsv_path=DATA_TSV, wavs_dir=WAVS_DIR, sr=SAMPLE_RATE):
+    def __init__(self, tsv_path=DATA_TSV, wavs_dir=WAVS_DIR, sr=SAMPLE_RATE, language=LANGUAGE):
         self.phase = Phase(sample_rate=sr)
         self.sr = sr
         self.wavs_dir = wavs_dir
+        self.language = language
 
         with open(tsv_path, "r") as f:
             lines = [line.strip().split("\t") for line in f if line.strip()]
@@ -51,7 +53,18 @@ class TTSDataset(Dataset):
             self.paths.append(wav_path)
             self.texts.append(text)
 
-        self.tokenizer = TextTokenizer(self.texts)
+        from pygoruut.pygoruut import Pygoruut
+        self.pygoruut = Pygoruut(writeable_bin_dir="")
+        instances = [Pygoruut(writeable_bin_dir="") for _ in range(PHONEMIZE_TRIALS)]
+        self.ipa_texts = []
+        for t in self.texts:
+            variants = set()
+            for i in range(PHONEMIZE_TRIALS):
+                variants.add(str(instances[i].phonemize(language=language, sentence=t)))
+            self.ipa_texts.append(variants)
+
+        all_ipa = [v for variants in self.ipa_texts for v in variants]
+        self.tokenizer = TextTokenizer(all_ipa)
 
     def __len__(self):
         return len(self.paths)
@@ -59,6 +72,7 @@ class TTSDataset(Dataset):
     def __getitem__(self, idx):
         wav_path = self.paths[idx]
         text = self.texts[idx]
+        ipa_text = random.choice(list(self.ipa_texts[idx]))
 
         audio, sr = sf.read(wav_path)
         assert sr == self.sr, f"Expected sr={self.sr}, got {sr} in {wav_path}"
@@ -68,12 +82,13 @@ class TTSDataset(Dataset):
         spec = spec.reshape(T, N_FREQS, N_CHANNELS)
 
         spec = torch.from_numpy(spec).float()
-        tokens = self.tokenizer.encode(text)
+        tokens = self.tokenizer.encode(ipa_text)
 
         return {
             "spec": spec,
             "spec_len": spec.shape[0],
             "text": text,
+            "ipa_text": ipa_text,
             "tokens": tokens,
             "tokens_len": len(tokens),
             "path": wav_path,
