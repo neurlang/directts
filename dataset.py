@@ -36,7 +36,7 @@ class TextTokenizer:
 
 
 class TTSDataset(Dataset):
-    def __init__(self, tsv_path=DATA_TSV, wavs_dir=WAVS_DIR, sr=SAMPLE_RATE, language=LANGUAGE):
+    def __init__(self, tsv_path=DATA_TSV, wavs_dir=WAVS_DIR, sr=SAMPLE_RATE, language=LANGUAGE, limit=-1):
         self.phase = Phase(sample_rate=sr)
         self.sr = sr
         self.wavs_dir = wavs_dir
@@ -44,6 +44,9 @@ class TTSDataset(Dataset):
 
         with open(tsv_path, "r") as f:
             lines = [line.strip().split("\t") for line in f if line.strip()]
+
+        if len(lines) > limit:
+            lines = lines[:limit]
 
         self.paths = []
         self.texts = []

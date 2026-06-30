@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -56,12 +57,24 @@ def generate_sample(model, text, tokenizer, output_path, device, pygoruut, langu
     model.train()
 
 
-def train():
+def train(finetune_checkpoint=None, limit=-1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ds = TTSDataset()
+    ds = TTSDataset(limit=limit)
+
+    if finetune_checkpoint:
+        checkpoint = torch.load(finetune_checkpoint, map_location=device, weights_only=False)
+        ds.tokenizer = checkpoint["tokenizer"]
+        print(f"Loaded checkpoint from {finetune_checkpoint}")
+    else:
+        checkpoint = None
+
     loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pad_collate)
 
     model = DirectTTS(ds.tokenizer.vocab_size).to(device)
+    if finetune_checkpoint:
+        model.load_state_dict(checkpoint["model"])
+        print("Model weights loaded for fine-tuning")
+
     optim = AdamW(model.parameters(), lr=LR)
 
     print(f"Training on {len(ds)} samples. Model params: {sum(p.numel() for p in model.parameters()):,}")
@@ -112,7 +125,7 @@ def train():
                 # only supervise on valid (non-padding) frames
                 valid_conf = ~frame_mask                    # (B, T)
                 loss_conf = F.mse_loss(
-                    confidence[valid_conf],
+                    confidence[valid_conf].squeeze(-1),
                     target_conf.squeeze(-1)[valid_conf])
 
             eos_target = torch.zeros(B, T, dtype=torch.long, device=spec.device)
@@ -124,6 +137,16 @@ def train():
             loss = loss_frame + 0.1 * loss_eos + 0.05 * loss_conf
 
             optim.zero_grad()
+
+            if epoch == 1 or epoch % 100 == 0 or epoch == EPOCHS:
+                with torch.no_grad():
+                    loss_per_sample_raw = ((frame_pred - spec_flat)**2).mean(dim=[1,2])
+                    diff = (frame_pred - spec_flat)**2
+                    mask_expanded = (~frame_mask).unsqueeze(-1)
+                    loss_per_sample_masked = (diff * mask_expanded).sum(dim=[1,2]) / mask_expanded.sum(dim=[1,2]).clamp(min=1)
+                    for b in range(min(4, B)):
+                        print(f"  sample {b}: raw MSE={loss_per_sample_raw[b]:.6f}  masked MSE={loss_per_sample_masked[b]:.6f}  n_valid={mask_expanded[b].sum().item()}")
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_GRAD_NORM)
             optim.step()
@@ -142,4 +165,10 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--finetune", type=str, default=None,
+                        help="Path to checkpoint to fine-tune from (resets epoch to 0)")
+    parser.add_argument("--limit", type=int, default=-1,
+                        help="Dataset file count limit")
+    args = parser.parse_args()
+    train(finetune_checkpoint=args.finetune, limit=args.limit)

@@ -5,13 +5,6 @@ import torch.nn.functional as F
 
 from config import D_MODEL, N_ENCODER_LAYERS, N_DECODER_LAYERS, N_HEADS, FF_DIM, DROPOUT, MAX_TEXT_LEN, MAX_SPEC_LEN, N_FREQS, N_CHANNELS, LOCAL_MASK, MASK_RATE, N_ITERATIONS
 
-class AlwaysDropout(nn.Module):
-    def __init__(self, p):
-        super().__init__()
-        self.p = p
-    def forward(self, x):
-        return F.dropout(x, p=self.p, training=True)  # always on
-
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
@@ -50,10 +43,10 @@ class SpecDecoder(nn.Module):
         self.prenet = nn.Sequential(
             nn.Linear(self.frame_size, d_model),
             nn.ReLU(),
-            AlwaysDropout(0.5),
+            #AlwaysDropout(0.5),
             nn.Linear(d_model, d_model),
             nn.ReLU(),
-            AlwaysDropout(0.5),
+            #AlwaysDropout(0.5),
         )
         self.pos_enc = PositionalEncoding(d_model, max_len)
         self.start_frame = nn.Parameter(torch.randn(1, 1, self.frame_size) * 0.01)
