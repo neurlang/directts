@@ -118,8 +118,10 @@ class DurationPredictor(nn.Module):
 
 
 class DurationDecoder(nn.Module):
-    """Autoregressive decoder that processes the expanded (frame-aligned) phone sequence.
-    Uses TransformerDecoder with causal masking to force sequential frame prediction."""
+    """Autoregressive decoder — predicts frames from expanded phone sequence.
+    Uses TransformerEncoder with causal self-attention.
+    Memory (expanded phone sequence) is injected via element-wise addition,
+    avoiding the O(n²) memory cost of diagonal cross-attention."""
     def __init__(self, d_model=D_MODEL, n_layers=N_DECODER_LAYERS,
                  n_heads=N_HEADS, ff_dim=FF_DIM, dropout=DROPOUT, max_len=MAX_SPEC_LEN):
         super().__init__()
@@ -132,8 +134,9 @@ class DurationDecoder(nn.Module):
         )
         self.pos_enc = PositionalEncoding(d_model, max_len)
         self.start_frame = nn.Parameter(torch.randn(1, 1, self.frame_size) * 0.01)
-        layer = nn.TransformerDecoderLayer(d_model, n_heads, ff_dim, dropout, batch_first=True)
-        self.decoder = nn.TransformerDecoder(layer, n_layers)
+        self.memory_proj = nn.Linear(d_model, d_model)
+        layer = nn.TransformerEncoderLayer(d_model, n_heads, ff_dim, dropout, batch_first=True)
+        self.layers = nn.TransformerEncoder(layer, n_layers)
         self.output_proj = nn.Linear(d_model, self.frame_size)
         self.eos_head = nn.Linear(d_model, 2)
 
@@ -141,9 +144,9 @@ class DurationDecoder(nn.Module):
                 memory_key_padding_mask=None, tgt_key_padding_mask=None):
         x = self.prenet(tgt_frames)
         x = self.pos_enc(x)
-        x = self.decoder(x, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
-                         tgt_key_padding_mask=tgt_key_padding_mask,
-                         memory_key_padding_mask=memory_key_padding_mask)
+        mem = self.memory_proj(memory)
+        x = x + mem
+        x = self.layers(x, mask=tgt_mask, src_key_padding_mask=tgt_key_padding_mask)
         frame_pred = self.output_proj(x)
         eos_logits = self.eos_head(x)
         return frame_pred, eos_logits
@@ -164,39 +167,35 @@ class DirectTTS(nn.Module):
 
     def forward(self, tokens, spec_frames, token_mask=None, frame_mask=None,
                 spec_lens=None):
-        """
-        Two-pass training:
-          Pass 1 — AR teacher forcing via SpecDecoder, MAS alignment, duration extraction
-          Pass 2 — DurationDecoder on expanded encoder sequence
-        """
         B = tokens.size(0)
         device = tokens.device
         T_spec = spec_frames.size(1)
 
-        # ── Encode ──
+        # ── Encode (in graph — trains encoder for both dur_pred and DD losses) ──
         memory = self.encoder(tokens, mask=token_mask)
 
-        # ── Pass 1: AR alignment pass ──
-        start = self.decoder.start_frame.expand(B, -1, -1)
-        dec_in = torch.cat([start, spec_frames[:, :-1]], dim=1)
-        tgt_mask = _causal_mask(T_spec, device)
-        ar_preds, ar_eos, _, hidden = self.decoder(
-            memory, dec_in, tgt_mask=tgt_mask,
-            tgt_key_padding_mask=frame_mask,
-            memory_key_padding_mask=token_mask)
+        # ── Pass 1: AR alignment pass (detached — no gradients through MAS) ──
+        with torch.no_grad():
+            start = self.decoder.start_frame.expand(B, -1, -1)
+            dec_in = torch.cat([start, spec_frames[:, :-1]], dim=1)
+            tgt_mask = _causal_mask(T_spec, device)
+            ar_preds, ar_eos, _, hidden = self.decoder(
+                memory, dec_in, tgt_mask=tgt_mask,
+                tgt_key_padding_mask=frame_mask,
+                memory_key_padding_mask=token_mask)
 
-        # ── MAS alignment ──
-        scores = self.alignment_scorer(hidden, memory)
-        alignment = monotonic_alignment_search(scores, token_mask=token_mask, frame_mask=frame_mask)
-        durations = extract_durations(alignment, token_mask, MIN_DURATION)
+            scores = self.alignment_scorer(hidden, memory)
+            alignment = monotonic_alignment_search(
+                scores, token_mask=token_mask, frame_mask=frame_mask)
+            durations = extract_durations(alignment, token_mask, MIN_DURATION)
 
-        # ── Duration predictor ──
-        dur_pred = self.duration_predictor(memory, token_mask)
-
-        # ── Expand encoder memory by extracted durations ──
+        # ── Expand (in graph — DD loss trains encoder) ──
         expanded, expand_mask, _ = self._expand(memory, durations, token_mask)
 
-        # ── Pass 2: Autoregressive DurationDecoder (teacher forcing with causal masks) ──
+        # ── Duration predictor (in graph) ──
+        dur_pred = self.duration_predictor(memory, token_mask)
+
+        # ── Pass 2: DurationDecoder (in graph, causal self-attn, element-wise memory) ──
         T_expanded = expanded.size(1)
         T_common = min(T_spec, T_expanded)
         expanded = expanded[:, :T_common]
@@ -205,14 +204,10 @@ class DirectTTS(nn.Module):
         dd_start = self.duration_decoder.start_frame.expand(B, -1, -1)
         dd_tgt = torch.cat([dd_start, spec_frames[:, :T_common - 1]], dim=1)
         dd_tgt_mask = _causal_mask(T_common, device)
-        # Diagonal cross-attention: frame i attends only to memory position i
-        # (expand() already solved alignment — no need for a causal window)
-        dd_mem_mask = torch.full((T_common, T_common), float("-inf"), device=device)
-        dd_mem_mask.fill_diagonal_(0.0)
 
         dd_preds, dd_eos = self.duration_decoder(
-            expanded, dd_tgt, tgt_mask=dd_tgt_mask, memory_mask=dd_mem_mask,
-            memory_key_padding_mask=expand_mask)
+            expanded, dd_tgt, tgt_mask=dd_tgt_mask,
+            tgt_key_padding_mask=expand_mask)
 
         return {
             "ar_preds": ar_preds,
@@ -225,14 +220,6 @@ class DirectTTS(nn.Module):
         }
 
     def _expand(self, memory, durations, token_mask):
-        """
-        Repeat each encoder output by its duration to produce a frame-level sequence.
-
-        Returns:
-            expanded: (B, max_len, D)
-            expand_mask: (B, max_len) — True for padding
-            token_indices: (B, max_len) — original token index for each expanded frame, -1 for padding
-        """
         B, T_text, D = memory.shape
         device = memory.device
 
@@ -245,33 +232,32 @@ class DirectTTS(nn.Module):
         total_lens = dur_valid.sum(dim=1).long()
         max_len = min(total_lens.max().item(), self.max_spec_len)
 
-        expanded = torch.zeros(B, max_len, D, device=device)
         expand_mask = torch.ones(B, max_len, dtype=torch.bool, device=device)
-        token_indices = torch.full((B, max_len), -1, dtype=torch.long, device=device)
+        gather_idx = torch.zeros(B, max_len, dtype=torch.long, device=device)
 
         for b in range(B):
-            pieces = []
             pos = 0
             for j in range(T_text):
                 if not valid_tokens[b, j]:
                     continue
                 dur = int(durations[b, j].item())
-                pieces.append(memory[b, j].unsqueeze(0).expand(dur, -1))
                 end = min(pos + dur, max_len)
-                if pos < max_len:
-                    token_indices[b, pos:end] = j
+                gather_idx[b, pos:end] = j
                 pos += dur
-            if pieces:
-                cat = torch.cat(pieces, dim=0)
-                n = min(cat.size(0), max_len)
-                expanded[b, :n] = cat[:n]
-                expand_mask[b, :n] = False
+                if pos >= max_len:
+                    break
+            expand_mask[b, :pos] = False
 
-        return expanded, expand_mask, token_indices
+        expanded = torch.gather(
+            memory.unsqueeze(1).expand(-1, max_len, -1, -1),
+            2,
+            gather_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, D)
+        ).squeeze(2)
+
+        return expanded, expand_mask, gather_idx
 
     @torch.no_grad()
     def generate(self, tokens, eos_threshold=0.5, max_frames=None):
-        """Autoregressive generation via duration prediction + expansion + AR decoding."""
         self.eval()
         B = tokens.size(0)
         device = tokens.device
@@ -279,11 +265,9 @@ class DirectTTS(nn.Module):
 
         memory = self.encoder(tokens)
 
-        # Predict durations
         dur_pred = self.duration_predictor(memory)
         durations = dur_pred.round().long().clamp(min=MIN_DURATION)
 
-        # Expand by predicted durations
         expanded, _, _ = self._expand(memory, durations, token_mask=None)
         T_expanded = expanded.size(1)
         if T_expanded > max_frames:
@@ -293,26 +277,19 @@ class DirectTTS(nn.Module):
         if T_expanded == 0:
             return torch.zeros(B, 0, self.duration_decoder.frame_size, device=device)
 
-        # Autoregressive generation loop
         generated = [self.duration_decoder.start_frame.expand(B, -1, -1)]
 
         for step in range(T_expanded):
             tgt = torch.cat(generated, dim=1)
             tgt_len = tgt.size(1)
             tgt_mask = _causal_mask(tgt_len, device)
-            # Diagonal cross-attention: frame i attends only to memory position i
-            # (expand() already solved alignment — no need for a causal window)
-            mem_mask = torch.full((tgt_len, T_expanded), float("-inf"), device=device)
-            for i in range(min(tgt_len, T_expanded)):
-                mem_mask[i, i] = 0.0
 
             frame_pred, eos_logits = self.duration_decoder(
-                expanded, tgt, tgt_mask=tgt_mask, memory_mask=mem_mask)
+                expanded[:, :tgt_len], tgt, tgt_mask=tgt_mask)
 
             next_frame = frame_pred[:, -1:, :]
             generated.append(next_frame)
 
-            # EOS check: stop if any sample in batch fires EOS
             eos_prob = torch.softmax(eos_logits, dim=-1)
             if (eos_prob[:, -1, 1] > eos_threshold).any():
                 break
