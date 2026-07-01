@@ -205,8 +205,10 @@ class DirectTTS(nn.Module):
         dd_start = self.duration_decoder.start_frame.expand(B, -1, -1)
         dd_tgt = torch.cat([dd_start, spec_frames[:, :T_common - 1]], dim=1)
         dd_tgt_mask = _causal_mask(T_common, device)
-        # Causal cross-attention: frame i can only attend to memory positions ≤ i
-        dd_mem_mask = _causal_mask(T_common, device)
+        # Diagonal cross-attention: frame i attends only to memory position i
+        # (expand() already solved alignment — no need for a causal window)
+        dd_mem_mask = torch.full((T_common, T_common), float("-inf"), device=device)
+        dd_mem_mask.fill_diagonal_(0.0)
 
         dd_preds, dd_eos = self.duration_decoder(
             expanded, dd_tgt, tgt_mask=dd_tgt_mask, memory_mask=dd_mem_mask,
@@ -298,10 +300,11 @@ class DirectTTS(nn.Module):
             tgt = torch.cat(generated, dim=1)
             tgt_len = tgt.size(1)
             tgt_mask = _causal_mask(tgt_len, device)
-            # Causal cross-attention: frame i can only see memory positions ≤ i
+            # Diagonal cross-attention: frame i attends only to memory position i
+            # (expand() already solved alignment — no need for a causal window)
             mem_mask = torch.full((tgt_len, T_expanded), float("-inf"), device=device)
-            for i in range(tgt_len):
-                mem_mask[i, :i + 1] = 0.0
+            for i in range(min(tgt_len, T_expanded)):
+                mem_mask[i, i] = 0.0
 
             frame_pred, eos_logits = self.duration_decoder(
                 expanded, tgt, tgt_mask=tgt_mask, memory_mask=mem_mask)
