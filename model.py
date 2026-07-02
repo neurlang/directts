@@ -259,40 +259,41 @@ class DirectTTS(nn.Module):
     @torch.no_grad()
     def generate(self, tokens, eos_threshold=0.5, max_frames=None):
         self.eval()
-        B = tokens.size(0)
-        device = tokens.device
-        max_frames = max_frames or self.max_spec_len
+        with torch.no_grad():
+            B = tokens.size(0)
+            device = tokens.device
+            max_frames = max_frames or self.max_spec_len
 
-        memory = self.encoder(tokens)
+            memory = self.encoder(tokens)
 
-        dur_pred = self.duration_predictor(memory)
-        durations = dur_pred.round().long().clamp(min=MIN_DURATION)
+            dur_pred = self.duration_predictor(memory)
+            durations = dur_pred.round().long().clamp(min=MIN_DURATION)
 
-        expanded, _, _ = self._expand(memory, durations, token_mask=None)
-        T_expanded = expanded.size(1)
-        if T_expanded > max_frames:
-            expanded = expanded[:, :max_frames]
-            T_expanded = max_frames
+            expanded, _, _ = self._expand(memory, durations, token_mask=None)
+            T_expanded = expanded.size(1)
+            if T_expanded > max_frames:
+                expanded = expanded[:, :max_frames]
+                T_expanded = max_frames
 
-        if T_expanded == 0:
-            return torch.zeros(B, 0, self.duration_decoder.frame_size, device=device)
+            if T_expanded == 0:
+                return torch.zeros(B, 0, self.duration_decoder.frame_size, device=device)
 
-        generated = [self.duration_decoder.start_frame.expand(B, -1, -1)]
+            generated = [self.duration_decoder.start_frame.expand(B, -1, -1)]
 
-        for step in range(T_expanded):
-            tgt = torch.cat(generated, dim=1)
-            tgt_len = tgt.size(1)
-            tgt_mask = _causal_mask(tgt_len, device)
+            for step in range(T_expanded):
+                tgt = torch.cat(generated, dim=1)
+                tgt_len = tgt.size(1)
+                tgt_mask = _causal_mask(tgt_len, device)
 
-            frame_pred, eos_logits = self.duration_decoder(
-                expanded[:, :tgt_len], tgt, tgt_mask=tgt_mask)
+                frame_pred, eos_logits = self.duration_decoder(
+                    expanded[:, :tgt_len], tgt, tgt_mask=tgt_mask)
 
-            next_frame = frame_pred[:, -1:, :]
-            generated.append(next_frame)
+                next_frame = frame_pred[:, -1:, :]
+                generated.append(next_frame)
 
-            eos_prob = torch.softmax(eos_logits, dim=-1)
-            if (eos_prob[:, -1, 1] > eos_threshold).any():
-                break
+                eos_prob = torch.softmax(eos_logits, dim=-1)
+                if (eos_prob[:, -1, 1] > eos_threshold).any():
+                    break
 
-        result = torch.cat(generated[1:], dim=1)
+            result = torch.cat(generated[1:], dim=1)
         return result

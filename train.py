@@ -1,3 +1,4 @@
+import gc
 import argparse
 import torch
 import torch.nn.functional as F
@@ -50,13 +51,17 @@ def pad_collate(batch):
 def generate_sample(model, text, tokenizer, output_path, device, pygoruut, language):
     text = str(pygoruut.phonemize(language=language, sentence=text))
     model.eval()
-    tokens = tokenizer.encode(text).unsqueeze(0).to(device)
-    gen_spec = model.generate(tokens)
-    spec_np = gen_spec.squeeze(0).reshape(-1, 2).cpu().numpy()
+    with torch.no_grad():
+        tokens = tokenizer.encode(text).unsqueeze(0).to(device)
+        gen_spec = model.generate(tokens)
+        spec_np = gen_spec.squeeze(0).reshape(-1, 2).cpu().numpy()
+        del gen_spec, tokens
     phase = Phase(sample_rate=SAMPLE_RATE)
     audio = phase.from_phase(spec_np)
     sf.write(output_path, audio, SAMPLE_RATE)
     model.train()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def train(finetune_checkpoint=None, limit=-1):
@@ -167,19 +172,55 @@ def train(finetune_checkpoint=None, limit=-1):
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_GRAD_NORM)
             optim.step()
 
-        if epoch == 1 or epoch % 100 == 0 or epoch == EPOCHS:
+        # Save loss scalars before freeing tensors
+        epoch_dd_frame = dd_loss_frame.item()
+        epoch_dd_eos = dd_loss_eos.item()
+        epoch_dur = dur_loss.item()
+        epoch_ar_frame = ar_loss_frame.item()
+        epoch_ar_eos = ar_loss_eos.item()
+        epoch_loss = loss.item()
+
+        # Free GPU tensors from last batch before eval generation
+        del spec, tokens, token_mask, frame_mask, spec_lens
+        del spec_flat, dd_preds, dd_eos, dd_mask, eos_target
+        del dur_pred, durations, ar_preds, ar_eos, ar_eos_target
+        del out
+        del loss, dd_loss_frame, dd_loss_eos, dur_loss, ar_loss_frame, ar_loss_eos
+        try:
+            del diff, loss_per_sample, mask_expanded
+        except NameError:
+            pass
+
+        # Free gradients
+        optim.zero_grad(set_to_none=True)
+
+        # Offload optimizer state to CPU to free GPU memory
+        optim_sd = optim.state_dict()
+        for group in optim.param_groups:
+            for p in group['params']:
+                optim.state[p].clear()
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if True:
+            torch.save({"model": model.state_dict(), "tokenizer": ds.tokenizer}, f"checkpoint_model_{epoch}.pt")
             for text in tqdm(ds.texts[:5] if len(ds.texts) >= 5 else ds.texts):
                 safe = "".join(c if c.isalnum() else "_" for c in text)[:30]
                 wav_path = f"train_{safe}_epoch_{epoch}.wav"
                 generate_sample(model, text, ds.tokenizer, wav_path, device, ds.pygoruut, ds.language)
-            print(f"{epoch:>6}  {dd_loss_frame.item():>8.4f}  {dd_loss_eos.item():>8.4f}  "
-                  f"{dur_loss.item():>8.4f}  {ar_loss_frame.item():>8.4f}  "
-                  f"{ar_loss_eos.item():>8.4f}  {loss.item():>8.4f}")
-            torch.save({"model": model.state_dict(), "tokenizer": ds.tokenizer}, f"checkpoint_model_{epoch}.pt")
+                gc.collect()
+                torch.cuda.empty_cache()
+            print(f"{epoch:>6}  {epoch_dd_frame:>8.4f}  {epoch_dd_eos:>8.4f}  "
+                  f"{epoch_dur:>8.4f}  {epoch_ar_frame:>8.4f}  "
+                  f"{epoch_ar_eos:>8.4f}  {epoch_loss:>8.4f}")
+
+        # Restore optimizer state back to GPU
+        optim.load_state_dict(optim_sd)
 
     torch.save({"model": model.state_dict(), "tokenizer": ds.tokenizer}, "trained_model.pt")
-    print(f"\nFinal DD frame loss: {dd_loss_frame.item():.6f}, DD EOS loss: {dd_loss_eos.item():.4f}, "
-          f"Dur loss: {dur_loss.item():.4f}")
+    print(f"\nFinal DD frame loss: {epoch_dd_frame:.6f}, DD EOS loss: {epoch_dd_eos:.4f}, "
+          f"Dur loss: {epoch_dur:.4f}")
     print("Model saved to trained_model.pt")
 
 
